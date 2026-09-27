@@ -1,0 +1,40 @@
+{
+  "policy_id": "R001_HIGH_CLAIM_AMOUNT",
+  "version": "1.0",
+  "scope": "Synthetic pharmacy claims portfolio project",
+  "purpose": "Prioritize unusually high paid claims for human review",
+  "flag_criteria": {
+    "quality_status": "PASS",
+    "claim_status": "PAID",
+    "minimum_claim_amount": 500
+  },
+  "review_criteria": {
+  "minimum_routine_claims": 10,
+  "minimum_amount_ratio": 3
+  },
+  "required_evidence": [
+    "transaction_id",
+    "pharmacy_id",
+    "claim_amount",
+    "claim_status",
+    "routine_claim_count",
+    "routine_avg_amount",
+    "amount_vs_pharmacy_average"
+  ],
+  "decision_rules": [
+    {
+      "condition": "Pharmacy baseline is missing or has fewer than 10 routine claims",
+      "recommendation": "NEEDS_MORE_EVIDENCE"
+    },
+    {
+      "condition": "Claim amount is at least 3 times the pharmacy routine average",
+      "recommendation": "INVESTIGATOR_REVIEW"
+    },
+    {
+      "condition": "Neither condition above applies",
+      "recommendation": "MONITOR"
+    }
+  ],
+  "human_approval_required_for_escalation": true,
+  "limitations": "A flag is not evidence of fraud. Thresholds are illustrative project rules, not a real regulatory policy."
+}
