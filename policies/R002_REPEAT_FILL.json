@@ -1,0 +1,43 @@
+{
+  "policy_id": "R002_REPEAT_FILL",
+  "version": "1.0",
+  "scope": "Synthetic pharmacy claims portfolio project",
+  "purpose": "Prioritize closely repeated paid claims for human review",
+  "required_current_fields": [
+    "transaction_id",
+    "transaction_date",
+    "patient_id",
+    "pharmacy_id",
+    "drug_id",
+    "quantity",
+    "claim_amount",
+    "claim_status",
+    "quality_status"
+  ],
+  "required_prior_fields": [
+    "transaction_id",
+    "transaction_date",
+    "patient_id",
+    "pharmacy_id",
+    "drug_id",
+    "quantity",
+    "claim_amount",
+    "claim_status",
+    "quality_status"
+  ],
+  "match_fields": [
+    "patient_id",
+    "pharmacy_id",
+    "drug_id",
+    "quantity",
+    "claim_amount"
+  ],
+  "maximum_days_between_claims": 7,
+  "decision_rules": {
+    "missing_prior_record": "NEEDS_MORE_EVIDENCE",
+    "prior_record_conflicts_with_signal": "MONITOR",
+    "verified_repeat_within_window": "INVESTIGATOR_REVIEW"
+  },
+  "human_approval_required_for_escalation": true,
+  "limitations": "A matching claim pair is a review signal, not proof of an improper fill. Legitimate processing or refill activity may explain it."
+}
