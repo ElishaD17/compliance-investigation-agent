@@ -1,32 +1,33 @@
 # Compliance Investigation Agent — Team Handoff
 
-**Status as of October 4, 2026**  
+Status as of October 11, 2026
 **Owner:** Elisha Damor  
 **Scope:** Synthetic pharmacy claims portfolio project  
-**Platform:** Python, Google BigQuery, Git/GitHub  
+**Platform:** Python, Google BigQuery, Gemini API, LangGraph, SQLite, Git/GitHub
 **BigQuery project:** `compliance-agent-509701`  
 **Dataset / location:** `compliance_analytics` / `US`
 
 ## 1. Executive summary
 
-We built a reproducible synthetic claims pipeline that generates 50,000 transactions, loads them into BigQuery, applies two review rules, collects evidence for flagged claims, and produces a JSON case report with a decision for each applicable policy. The current rules are:
+We built a reproducible synthetic claims pipeline that generates 50,000 transactions, loads them into BigQuery, applies two review rules, collects evidence for flagged claims, and produces a JSON case report with a decision for each applicable policy. Gemini drafts an investigator summary from verified facts; LangGraph orchestrates retrieval, policy evaluation, drafting, and a pause for human review. The current rules are:
 
 - **R001_HIGH_CLAIM_AMOUNT:** high paid claim relative to a pharmacy's routine claim amount.
 - **R002_REPEAT_FILL:** a closely repeated paid claim with matching patient, pharmacy, drug, quantity, and amount.
 
 The combined SQL candidate view contains **550 unique flagged transactions**. Against synthetic ground truth, the combined flags find all **400 planted review-positive transactions**, with **150 additional flagged transactions**. The combined flag precision is **72.7%** and recall is **100%** on this generated dataset. These are *candidate detection* metrics, not validated performance of the later Python policy decisions or evidence of fraud.
 
-An `INVESTIGATOR_REVIEW` decision is a recommendation for a human to examine the evidence. No automated adverse action or escalation is authorized by a flag alone.
+An `INVESTIGATOR_REVIEW` decision is a deterministic recommendation to examine evidence. The Gemini text is a draft. A local review workflow records an explicit reviewer decision before its status changes; it performs no external escalation or adverse action.
 
 ## 2. System flow and ownership
 
 ```mermaid
 flowchart TD
-    A["Python synthetic generator"] --> B["BigQuery v2 transactions"]
-    B --> C["Quality and rule views"]
-    C --> D["Candidate and evidence views"]
-    D --> E["Python case report"]
-    E --> F["Human investigator review"]
+    A["Synthetic claims"] --> B["BigQuery quality and candidate views"]
+    B --> C["Evidence retrieval"]
+    C --> D["Deterministic policy decisions"]
+    D --> E["Gemini draft"]
+    E --> F["LangGraph review pause"]
+    F --> G["Recorded human decision"]
 ```
 
 | Stage | Purpose | Implemented artifact |
@@ -41,6 +42,9 @@ flowchart TD
 | Retrieve | Fetch an individual case or complete repeat pair | `scripts/get_case.py`; `scripts/get_repeat_pair.py` |
 | Decide | Evaluate R001 and R002 against versioned JSON policies | `scripts/policy_engine.py`; `scripts/evaluate_r002.py` |
 | Report | Return evidence plus one decision per applicable policy | `scripts/build_case_report.py` |
+| Draft | Summarize selected verified facts for an investigator without changing policy decisions | `scripts/summarize_case.py`; Gemini API |
+| Orchestrate | Run evidence retrieval, policy evaluation, and drafting as graph nodes | `scripts/run_case_graph.py`; LangGraph |
+| Review | Pause, checkpoint locally, and resume with a recorded human decision | `scripts/review_case_graph.py`; SQLite |
 | Measure | Compare candidate IDs against synthetic ground truth | `scripts/evaluate_rules.py` |
 
 The Python project runs locally from `C:\Users\Elish\compliance-investigation-agent` in a virtual environment. BigQuery stores the queryable transaction and view layer; the local repository stores code and policies. The generated rows and ground truth are local artifacts excluded from Git.
@@ -103,6 +107,8 @@ Both JSON policies declare `human_approval_required_for_escalation: true`. A mat
 
 For R002, we also changed a **copy held only in PowerShell memory** to set the prior quantity to 36; the decision became `MONITOR`. Setting the prior record ID to null produced `NEEDS_MORE_EVIDENCE`. Neither exercise changed BigQuery records.
 
+The Gemini and LangGraph draft paths were also run for both example cases. In the checkpointed review path, `TXN2-000912` paused and was returned for revision by Elisha with a note; `TXN2-000463` paused and received an explicit synthetic approval for investigator review. Each decision included a UTC timestamp. These actions changed only local SQLite state, not BigQuery data or any external case system.
+
 ## 6. Evaluation method and results
 
 `scripts/evaluate_rules.py --source r001|combined` loads the 50,000-row local `ground_truth_v2.csv`, queries the chosen BigQuery flag/candidate view for transaction IDs, checks for duplicate or unknown IDs, and calculates a confusion matrix. The ground-truth positive label is `expected_review == "1"`.
@@ -114,50 +120,54 @@ For R002, we also changed a **copy held only in PowerShell memory** to set the p
 
 Definitions: **TP** is a flagged review-positive transaction; **FP** is flagged but labeled benign; **FN** is review-positive but not flagged; **TN** is neither flagged nor labeled review-positive. Precision is `TP / (TP + FP)`; recall is `TP / (TP + FN)`. The 150 R002 candidates recover the 150 positives missed by R001 in this synthetic dataset. These metrics evaluate the **SQL candidate set**, not investigator outcomes or the accuracy of the policy recommendations.
 
-## 7. How to run the current workflow
+## 7. Running the current workflow
 
-Use PowerShell from the project root with the virtual environment activated and Google Application Default Credentials configured for the BigQuery project. The queries explicitly run in `US` and use parameterized case IDs.
+Run from the repository root in PowerShell with the virtual environment activated. BigQuery calls require Google Application Default Credentials for `compliance-agent-509701`; Gemini calls require a valid `GEMINI_API_KEY` environment variable in the current shell. Never put the API key in a source file, command history, screenshot, or Git commit. The default model is `gemini-3.1-flash-lite`; `GEMINI_MODEL` can override it.
 
 ```powershell
-# See candidate evaluation against local synthetic ground truth.
+# Compare SQL candidates with the local synthetic labels.
 python .\scripts\evaluate_rules.py --source r001
 python .\scripts\evaluate_rules.py --source combined
 
-# Inspect raw v2 case evidence.
-python .\scripts\get_case.py --case-id TXN2-000463
-
-# Retrieve a current repeat claim and its prior record.
-python .\scripts\get_repeat_pair.py --case-id TXN2-000912
-
-# Evaluate R002 as a standalone JSON pipeline.
-python .\scripts\get_repeat_pair.py --case-id TXN2-000912 | python .\scripts\evaluate_r002.py
-
-# Produce one evidence-and-decision report, using the same command for either rule.
-python .\scripts\build_case_report.py --case-id TXN2-000463
+# Inspect evidence and deterministic policy decisions.
 python .\scripts\build_case_report.py --case-id TXN2-000912
+
+# Create a Gemini draft directly, or via the three-node graph.
+python .\scripts\summarize_case.py --case-id TXN2-000912
+python .\scripts\run_case_graph.py --case-id TXN2-000912
+
+# Start a checkpointed case and pause for human review.
+python .\scripts\review_case_graph.py --case-id TXN2-000912
+
+# Resume a pending case with a human decision and a reason.
+python .\scripts\review_case_graph.py --case-id TXN2-000912 --decision RETURN_FOR_REVISION --reviewer Elisha --note "Verify the reason for the repeat claim"
+
+# Run local regression tests.
+python -m unittest discover -s tests -v
 ```
 
-`--case-id` means the **flagged current transaction ID**. The prior transaction ID is evidence attached to that case; passing the prior ID will return zero cases unless that transaction independently has a case row.
+Use a case ID that has not already completed a review in the local checkpoint database when demonstrating the start command. `--case-id` is the flagged **current** transaction ID; the prior ID is evidence attached to that case. The other supported reviewer choice is `APPROVE_ESCALATION`. The graph allows that choice only when a policy returned `INVESTIGATOR_REVIEW` and requires human approval. A reviewer is responsible for the substantive decision; a command-line name is not an authenticated identity.
 
-For R001, `build_case_report.py` calls `policy_engine.evaluate_case`. For R002, it calls the importable `evaluate_repeat_pair` function. The report contains `case_id`, a complete `evidence` object, and `policy_decisions` with the policy ID/version, decision, and human approval requirement. The R002 result includes a reason; the R001 result currently includes a list of missing evidence fields.
+The review workflow stores checkpoints in `data/generated/review_checkpoints.sqlite`, which is ignored by Git along with the rest of `data/generated/`. It can resume after closing PowerShell on the same machine if the database remains there. It does not synchronize reviewer decisions across machines and does not transmit an escalation to another system. `RETURNED_FOR_REVISION` is a recorded terminal outcome in the current demonstration; there is no automated revision loop.
 
 ## 8. Version control and verification status
 
-- The repository is maintained in Git/GitHub. Generated transaction data and local ground truth are not committed.
-- Commit **`ca9bea6`** was confirmed for `policies/R002_REPEAT_FILL.json`, `scripts/get_repeat_pair.py`, and `scripts/evaluate_r002.py`.
-- The R002 refactor and `scripts/build_case_report.py` were subsequently exercised successfully for the two example cases. A command to commit and push these later changes was given, but its result has **not** been shown in this conversation; the team should verify `git status` and the remote branch before treating them as published.
-- Validation observed: JSON policy syntax check; BigQuery retrieval for R001 and R002; all three R002 decision branches via one real pair and two in-memory variations; unified report output for one R001 and one R002 case; synthetic candidate evaluation above.
-- No automated regression suite, batch policy-decision evaluation, dashboard, production deployment, or investigator approval workflow has been demonstrated yet.
+- The repository is maintained in Git/GitHub. Generated data, ground truth, and the local SQLite checkpoint database are excluded from Git.
+- The Gemini summary and LangGraph draft workflow were merged to `main` (observed local merge at `d2a75d2`). The human-review branch commit `a9cf82b` was pushed and its PR was merged; the local `main` fast-forwarded to `437d2f9`.
+- R001 `TXN2-000463` and R002 `TXN2-000912` produced deterministic policy decisions and Gemini drafts through both the direct summarizer and LangGraph.
+- SQLite review was demonstrated for both policies: R002 returned for revision; R001 approved for escalation as a **synthetic workflow test**. Both records retained reviewer-supplied name, note, and UTC time. No external action was taken.
+- `python -m unittest discover -s tests -v` ran **8 passing tests**, covering R001 policy scenarios, R002 boundaries and conflicting evidence, and a guard that prevents a `MONITOR` case from being approved for escalation.
+- Candidate precision and recall in section 6 evaluate SQL flags against synthetic labels. They do not measure Gemini factuality, investigator quality, or real-world performance.
 
 ## 9. Known limits and next work
 
-1. **Synthetic only:** Counts and metrics describe generated claims with planted labels. Do not present them as real-world claims performance, fraud prevalence, or compliance determinations.
-2. **Human decision remains outside the tool:** The report recommends review; it does not record reviewer identity, approval, disposition, or an audit trail.
-3. **R001 false positives:** All 150 planted benign high claims are R001 candidates, and the current ratio criterion does not filter them out. Any adjustment should be evaluated against missed positives as well as precision.
-4. **Decision testing:** Add durable tests for policy boundaries (R001 10-claim and 3× cutoffs; R002 0/7/8 days, field mismatch, missing prior, conflicting status). Manual in-memory checks currently cover three R002 outcomes.
-5. **Report consistency:** R001 and R002 return slightly different decision fields. Standardize reason codes, missing evidence details, policy metadata, and schema before batch processing or a UI.
-6. **Operations:** Document/review the exact v2 SQL definitions and generator/load parameters in the repository, add a repeatable environment setup, and track the source dataset/policy versions used for each report.
-7. **Next project layer:** Once deterministic case reporting is stable, build an investigator-facing summary or agent layer grounded strictly in the case evidence and policy results, with citations to the fields used and no autonomous escalation.
+1. **Synthetic scope:** All transactions and labels are generated. The results are portfolio demonstrations, not real-world fraud or compliance performance.
+2. **Local review record:** SQLite preserves a pause and review outcome on one machine. Reviewer names are self-entered; identity verification, role-based access, centrally managed audit records, and cross-machine persistence remain to be designed before operational use.
+3. **No external escalation:** `HUMAN_APPROVED_FOR_ESCALATION` is a local recorded status. There is no ticket, notification, payment action, or external system integration. `RETURNED_FOR_REVISION` has no revision loop yet.
+4. **Draft validation:** Pydantic validates the Gemini output shape, and the script checks that cited `evidence_fields` exist in supplied facts. It does not fully verify every narrative claim or question; a human must review the text. The model must never override the deterministic policy decision.
+5. **R001 candidate false positives:** All 150 planted benign high claims are flagged by R001. Any threshold change requires evaluating both precision and missed positives against the synthetic labels.
+6. **Consistency and traceability:** Standardize R001/R002 reason codes and missing-evidence fields. Capture data snapshot, SQL/view version, policy version, model ID, prompt version, and reviewer identity in a durable case record.
+7. **Deployment and reporting:** Review the SQL definitions and generator/load parameters in Git; add repeatable setup, further tests for checkpoint recovery and reviewer controls, an investigator-facing UI or Power BI reporting layer, and container packaging. These are not yet demonstrated.
 
 ## 10. Glossary
 
@@ -166,7 +176,10 @@ For R001, `build_case_report.py` calls `policy_engine.evaluate_case`. For R002, 
 | Flag / candidate | SQL rule signal that a transaction should be considered for review. |
 | Case ID | Current flagged transaction ID used to retrieve one case. |
 | Prior record | Earlier claim referenced by an R002 signal and retrieved for verification. |
-| Evidence | Current claim, relevant baseline, and any prior claim fields supporting a decision. |
+| Evidence | Current claim, relevant pharmacy baseline, and any prior claim fields. |
 | Policy decision | Deterministic Python result from a versioned JSON policy and case evidence. |
-| Ground truth | Synthetic label from the generator used to measure candidate detection. |
-| Investigator review | Request for human assessment; not a finding of wrongdoing. |
+| Ground truth | Synthetic label from the generator used to measure SQL candidate detection. |
+| Draft summary | Gemini-written text based on selected verified facts; subject to human review. |
+| Checkpoint | Locally stored LangGraph state that lets a paused case resume later. |
+| Investigator review | Human assessment of a flagged case; no finding of misconduct is implied. |
+| Escalation approval | Recorded reviewer choice for a policy-eligible case; no external action is performed. |
